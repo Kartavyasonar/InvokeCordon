@@ -15,6 +15,7 @@ import (
 	"github.com/kartavyasonar/invokecordon/internal/proxy"
 	"github.com/kartavyasonar/invokecordon/internal/report"
 	"github.com/kartavyasonar/invokecordon/internal/scanner"
+	"github.com/kartavyasonar/invokecordon/internal/tracing"
 )
 
 func main() {
@@ -60,7 +61,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Println("InvokeCordon")
+	fmt.Println("ToolGate")
 	fmt.Println()
 	fmt.Println("Usage:")
 	fmt.Println("  invokecordon scan --target http://127.0.0.1:8000/mcp [--format text|json|markdown] [--output path]")
@@ -105,6 +106,9 @@ func runScan(target, formatStr, outputPath string) error {
 }
 
 func runProxy(listen, target, policyPath string) error {
+	shutdown := tracing.Init("invokecordon")
+	defer shutdown(context.Background())
+
 	p, err := policy.Load(policyPath)
 	if err != nil {
 		return fmt.Errorf("load policy: %w", err)
@@ -126,7 +130,6 @@ func runProxy(listen, target, policyPath string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Handle graceful shutdown (Ctrl+C)
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 	go func() {

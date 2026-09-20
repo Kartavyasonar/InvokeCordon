@@ -15,6 +15,10 @@ import (
 	"github.com/kartavyasonar/invokecordon/internal/policy"
 	"github.com/kartavyasonar/invokecordon/internal/redact"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type Config struct {
@@ -65,11 +69,14 @@ type toolsCallParams struct {
 func (s *Server) Start(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleProxy)
-	mux.Handle("/metrics", promhttp.Handler()) // <--- METRICS ENDPOINT
+	mux.Handle("/metrics", promhttp.Handler())
+
+	// Wrap the mux with OpenTelemetry instrumentation
+	handler := otelhttp.NewHandler(mux, "invokecordon.gateway")
 
 	srv := &http.Server{
 		Addr:    s.cfg.ListenAddr,
-		Handler: mux,
+		Handler: handler,
 	}
 
 	go func() {
@@ -79,7 +86,7 @@ func (s *Server) Start(ctx context.Context) error {
 		srv.Shutdown(shutdownCtx)
 	}()
 
-	slog.Info("InvokeCordon proxy listening", "addr", s.cfg.ListenAddr, "metrics", "/metrics")
+	slog.Info("ToolGate proxy listening", "addr", s.cfg.ListenAddr, "metrics", "/metrics")
 	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 		return err
 	}
@@ -122,18 +129,23 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// 1. EVALUATE POLICY
 	decision := policy.Evaluate(params.Name, params.Arguments, s.cfg.Policy)
 
+	// Attach custom attributes to the OpenTelemetry span
+	span := trace.SpanFromContext(r.Context())
+	span.SetAttributes(
+		attribute.String("tool.name", params.Name),
+		attribute.String("policy.decision", decision.Action),
+	)
+
 	// 2. REDACT (if allowed/monitored)
 	redactCount := 0
 	if decision.Action != "deny" {
-		// Only redact if we are actually forwarding the request
 		if s.cfg.Policy.Redaction.RequestFields != nil {
 			redactedArgs, count := redact.Redact(params.Arguments, s.cfg.Policy.Redaction.RequestFields)
 			if count > 0 {
 				params.Arguments = redactedArgs.(map[string]any)
 				redactCount = count
 				metrics.RedactionsTotal.Add(float64(count))
-				
-				// Re-marshal the request with redacted arguments
+
 				newParamsBytes, _ := json.Marshal(params)
 				req.Params = newParamsBytes
 				bodyBytes, _ = json.Marshal(req)
@@ -162,7 +174,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	metrics.Latency.WithLabelValues(req.Method).Observe(time.Since(start).Seconds())
 
 	if decision.Action == "deny" {
-		s.writeRPCError(w, req.ID, -32600, fmt.Sprintf("InvokeCordon Policy Denied: %s", decision.Reason))
+		s.writeRPCError(w, req.ID, -32600, fmt.Sprintf("ToolGate Policy Denied: %s", decision.Reason))
 		return
 	}
 
