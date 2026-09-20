@@ -94,24 +94,12 @@ go run ./cmd/invokecordon proxy \
 
 ### 4. Send traffic through the gateway
 
-Create `attack.json`:
-
-```json
-{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"run_command","arguments":{"cmd":"rm -rf /"}}}
-```
-
-Create `safe.json`:
-
-```json
-{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"safe_search","arguments":{"query":"hello"}}}
-```
+The payloads are already in the repo at `examples/attack.json` and `examples/safe.json`.
 
 Send the requests:
 
-```bash
-curl -X POST http://127.0.0.1:9090/ -H "Content-Type: application/json" -d @attack.json
-curl -X POST http://127.0.0.1:9090/ -H "Content-Type: application/json" -d @safe.json
-```
+curl -X POST http://127.0.0.1:9090/ -H "Content-Type: application/json" -d @examples/attack.json
+curl -X POST http://127.0.0.1:9090/ -H "Content-Type: application/json" -d @examples/safe.json
 
 If `mode: enforce` is set in your policy, the proxy blocks the attack and returns an error:
 
