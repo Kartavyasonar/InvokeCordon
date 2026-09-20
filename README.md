@@ -188,6 +188,11 @@ Tested locally using `k6` (20 Virtual Users, 30-second duration, 50/50 split bet
 
 **Why is it so fast?**
 When `mode: enforce` blocks a malicious request (like a shell injection attempt), the proxy rejects it in memory at the network edge. The request never reaches the upstream MCP server, resulting in near-zero latency and protecting the upstream infrastructure from DDoS or abuse.
+
+### Observability Dashboard
+InvokeCordon ships with a pre-provisioned Grafana dashboard at `dashboards/invokecordon.json`. Import it into your Grafana instance (connected to your Prometheus data source) to instantly visualize request rates, policy decisions (allow/deny/monitor), and latency histograms without writing PromQL from scratch.
+
+
 ## Project Layout
 
 ```text
