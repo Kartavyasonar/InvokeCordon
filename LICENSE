@@ -1,0 +1,15 @@
+First public release of InvokeCordon.
+
+Included
+- Static scanner: four detection rules, 0-100 score, A-F grade, text/json/markdown reports
+- Runtime proxy: JSON-RPC gateway with monitor and enforce modes
+- Policy engine: YAML tool rules plus recursive argument checks for path traversal, shell metacharacters, and cloud metadata
+- Redaction: recursive secret stripping from tool arguments before forwarding
+- Audit: concurrent-safe JSONL log storing SHA-256 payload hashes, never raw payloads
+- Metrics: Prometheus endpoint at /metrics
+- Benchmarks: k6, 20 VUs, 30s, avg 790 microseconds, p95 2.26ms, 0 percent errors
+
+Known limitations
+- HTTP JSON-RPC transport only
+- Pattern-based detection, not exhaustive
+- Does not address model-level prompt injection
