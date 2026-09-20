@@ -2,141 +2,158 @@ package policy
 
 import (
 	"fmt"
-	"net/url"
-	"regexp"
 	"strings"
 )
 
-var (
-	shellCommandPattern = regexp.MustCompile(`(?i)(^|[\s;|&` + "`" + `$'\"(])(rm|curl|wget|bash|sh)([\s;|&` + "`" + `$'\")]|$)`)
-	unixAbsPathPattern  = regexp.MustCompile(`(?i)(?:^|[\s"'=])(/(?:etc|usr|var|home|root|proc|sys|dev|tmp|opt|bin|sbin)(?:/|$))`)
-)
-
-func Evaluate(toolName string, arguments map[string]any, policy Policy) Decision {
-	decision := baseDecision(toolName, policy)
-	if rule := firstArgumentViolation(arguments, policy.ArgumentRules); rule != "" {
-		reason := fmt.Sprintf("Argument violated rule: %s", rule)
-		if policy.Mode == ModeEnforce {
-			return Decision{Action: ActionDeny, Reason: reason}
+// Evaluate checks tool rules, protected arguments, and generic argument rules.
+func Evaluate(toolName string, arguments map[string]any, p Policy) Decision {
+	// 1. Find tool rule
+	var toolRule *ToolRule
+	for i := range p.Tools {
+		if p.Tools[i].Name == toolName {
+			toolRule = &p.Tools[i]
+			break
 		}
-		return Decision{Action: ActionMonitor, Reason: reason}
 	}
-	return decision
+
+	// 2. Determine base action
+	action := p.DefaultAction
+	reason := fmt.Sprintf("default action is %s", action)
+	if toolRule != nil {
+		action = toolRule.Action
+		if toolRule.Reason != "" {
+			reason = toolRule.Reason
+		} else {
+			reason = fmt.Sprintf("tool %q is %s by policy", toolName, action)
+		}
+	}
+
+	// If base action is explicitly deny, return immediately
+	if action == ActionDeny {
+		return Decision{Action: ActionDeny, Reason: reason}
+	}
+
+	// 3. Check Protected Arguments (Tier 1)
+	// These override "allow" if the value is not in the allowlist.
+	if toolRule != nil && toolRule.ProtectedArguments != nil && arguments != nil {
+		for argName, rule := range toolRule.ProtectedArguments {
+			val, exists := arguments[argName]
+			if !exists {
+				continue // Missing protected argument is allowed (optional)
+			}
+
+			strVal, ok := val.(string)
+			if !ok {
+				return makeViolation(p.Mode, fmt.Sprintf("Protected argument violated: %s must be a string", argName))
+			}
+
+			allowed := false
+
+			// Check exact values
+			for _, v := range rule.AllowValues {
+				if strVal == v {
+					allowed = true
+					break
+				}
+			}
+
+			// Check domains (for emails)
+			if !allowed && strings.Contains(strVal, "@") {
+				parts := strings.Split(strVal, "@")
+				if len(parts) == 2 {
+					domain := strings.ToLower(strings.TrimSpace(parts[1]))
+					for _, d := range rule.AllowDomains {
+						if domain == strings.ToLower(d) {
+							allowed = true
+							break
+						}
+					}
+				}
+			}
+
+			if !allowed {
+				return makeViolation(p.Mode, fmt.Sprintf("Protected argument violated: %s", argName))
+			}
+		}
+	}
+
+	// 4. Check Generic Argument Rules
+	if arguments != nil {
+		if p.ArgumentRules.BlockPathTraversal && checkMap(arguments, isPathTraversal) {
+			return makeViolation(p.Mode, "Argument violated rule: "+RulePathTraversal)
+		}
+		if p.ArgumentRules.BlockShellMetacharacters && checkMap(arguments, isShellInjection) {
+			return makeViolation(p.Mode, "Argument violated rule: "+RuleShellMetacharacters)
+		}
+		if p.ArgumentRules.BlockCloudMetadata && checkMap(arguments, isCloudMetadata) {
+			return makeViolation(p.Mode, "Argument violated rule: "+RuleCloudMetadata)
+		}
+	}
+
+	// 5. Return base action
+	return Decision{Action: action, Reason: reason}
 }
 
-func baseDecision(toolName string, policy Policy) Decision {
-	for _, tool := range policy.Tools {
-		if tool.Name == toolName {
-			reason := tool.Reason
-			if reason == "" {
-				reason = fmt.Sprintf("tool %q is %s by policy", tool.Name, tool.Action)
-			}
-			return Decision{Action: tool.Action, Reason: reason}
-		}
+func makeViolation(mode string, reason string) Decision {
+	if mode == ModeEnforce {
+		return Decision{Action: ActionDeny, Reason: reason}
 	}
-	return Decision{
-		Action: policy.DefaultAction,
-		Reason: fmt.Sprintf("default action is %s", policy.DefaultAction),
-	}
+	return Decision{Action: ActionMonitor, Reason: reason}
 }
 
-func firstArgumentViolation(arguments map[string]any, rules ArgumentRules) string {
-	if arguments == nil {
-		return ""
-	}
-	var found string
-	walkStrings(arguments, func(value string) bool {
-		if rules.BlockPathTraversal && isPathTraversal(value) {
-			found = RulePathTraversal
-			return true
-		}
-		if rules.BlockShellMetacharacters && isShellInjection(value) {
-			found = RuleShellMetacharacters
-			return true
-		}
-		if rules.BlockCloudMetadata && isCloudMetadata(value) {
-			found = RuleCloudMetadata
-			return true
-		}
-		return false
-	})
-	return found
-}
+// --- Helper Functions for Argument Checking ---
 
-func walkStrings(v any, fn func(string) bool) bool {
-	switch x := v.(type) {
-	case nil:
-		return false
-	case string:
-		return fn(x)
-	case map[string]any:
-		for _, child := range x {
-			if walkStrings(child, fn) {
-				return true
-			}
-		}
-	case map[any]any:
-		for _, child := range x {
-			if walkStrings(child, fn) {
-				return true
-			}
-		}
-	case []any:
-		for _, child := range x {
-			if walkStrings(child, fn) {
-				return true
-			}
-		}
-	case []string:
-		for _, child := range x {
-			if fn(child) {
-				return true
-			}
+type checker func(string) bool
+
+func checkMap(m map[string]any, check checker) bool {
+	for _, v := range m {
+		if checkValue(v, check) {
+			return true
 		}
 	}
 	return false
 }
 
-func inspectionVariants(s string) []string {
-	variants := []string{s, strings.ToLower(s)}
-	cur := s
-	for i := 0; i < 3; i++ {
-		decoded, err := url.PathUnescape(cur)
-		if err != nil || decoded == cur {
-			break
+func checkValue(v any, check checker) bool {
+	switch val := v.(type) {
+	case string:
+		if check(val) {
+			return true
 		}
-		variants = append(variants, decoded, strings.ToLower(decoded))
-		cur = decoded
+	case map[string]any:
+		if checkMap(val, check) {
+			return true
+		}
+	case []any:
+		for _, item := range val {
+			if checkValue(item, check) {
+				return true
+			}
+		}
 	}
-	return variants
+	return false
 }
 
 func isPathTraversal(s string) bool {
-	for _, candidate := range inspectionVariants(s) {
-		lower := strings.ToLower(candidate)
-		switch {
-		case strings.Contains(candidate, "../"),
-			strings.Contains(candidate, `..\`),
-			strings.Contains(lower, "..%2f"),
-			strings.Contains(lower, "%2e%2e%2f"),
-			strings.Contains(lower, "%2e%2e/"),
-			strings.Contains(lower, "/etc/passwd"),
-			unixAbsPathPattern.MatchString(candidate):
-			return true
-		}
-	}
-	return false
+	lower := strings.ToLower(s)
+	return strings.Contains(lower, "../") ||
+		strings.Contains(lower, "..\\") ||
+		strings.Contains(lower, "..%2f") ||
+		strings.Contains(lower, "%2e%2e%2f") ||
+		strings.Contains(lower, "/etc/passwd") ||
+		strings.Contains(lower, "/etc/shadow")
 }
 
 func isShellInjection(s string) bool {
-	for _, candidate := range inspectionVariants(s) {
-		if strings.Contains(candidate, ";") ||
-			strings.Contains(candidate, "&&") ||
-			strings.Contains(candidate, "||") ||
-			strings.Contains(candidate, "|") ||
-			strings.Contains(candidate, "`") ||
-			strings.Contains(candidate, "$(") ||
-			shellCommandPattern.MatchString(candidate) {
+	lower := strings.ToLower(s)
+	// Common metacharacters
+	if strings.ContainsAny(s, ";|&`$()") {
+		return true
+	}
+	// Common dangerous commands
+	dangerous := []string{"rm ", "curl ", "wget ", "bash ", "sh ", "nc ", "python ", "perl "}
+	for _, cmd := range dangerous {
+		if strings.Contains(lower, cmd) {
 			return true
 		}
 	}
@@ -144,11 +161,7 @@ func isShellInjection(s string) bool {
 }
 
 func isCloudMetadata(s string) bool {
-	for _, candidate := range inspectionVariants(s) {
-		lower := strings.ToLower(candidate)
-		if strings.Contains(lower, "169.254.169.254") || strings.Contains(lower, "metadata.google.internal") {
-			return true
-		}
-	}
-	return false
+	lower := strings.ToLower(s)
+	return strings.Contains(lower, "169.254.169.254") ||
+		strings.Contains(lower, "metadata.google.internal")
 }
