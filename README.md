@@ -220,7 +220,7 @@ See `docs/threat-model.md` for the full threat model.
 ## Roadmap (v0.2)
 
 * OpenTelemetry tracing.
-* Grafana dashboard JSON and k6 load tests.
+* Grafana dashboard JSON.
 * Response-side redaction.
 * stdio MCP transport.
 
